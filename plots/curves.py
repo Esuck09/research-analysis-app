@@ -130,3 +130,38 @@ def plot_metric_curves_matplotlib(
 
     fig.tight_layout()
     return fig
+
+def plot_aggregated_curves(
+    fig,
+    aggregated: dict,
+    metric: str,
+):
+    """
+    Overlay mean ± std bands onto an existing Plotly figure.
+    """
+    
+
+    for key, df in aggregated.items():
+        label = " / ".join(str(k) for k in key)
+
+        fig.add_trace(
+            go.Scatter(
+                x=df["epoch"],
+                y=df["mean"],
+                mode="lines",
+                name=f"{label} (mean)",
+                line=dict(width=4, dash="solid"),
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=list(df["epoch"]) + list(df["epoch"][::-1]),
+                y=list(df["mean"] + df["std"]) + list((df["mean"] - df["std"])[::-1]),
+                fill="toself",
+                fillcolor="rgba(0,0,0,0.12)",
+                line=dict(width=0),
+                name=f"{label} ± std",
+                showlegend=False,
+            )
+        )
