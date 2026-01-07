@@ -9,6 +9,7 @@ Responsible for:
 from typing import Any, Dict
 import json
 import pandas as pd
+from utils.io import ExperimentLoadError
 
 
 def load_json(file: Any) -> Dict[str, Any]:
@@ -32,16 +33,16 @@ def load_json(file: Any) -> Dict[str, Any]:
     try:
         content = json.load(file)
     except Exception as e:
-        raise ValueError(f"Failed to parse JSON file: {e}")
+        raise ExperimentLoadError(f"Failed to parse JSON file: {e}")
 
     if not isinstance(content, dict):
-        raise ValueError("Top-level JSON structure must be an object.")
+        raise ExperimentLoadError("Top-level JSON must be an object.")
 
     if "metrics" not in content:
-        raise ValueError("JSON must contain a 'metrics' field.")
+        raise ExperimentLoadError("JSON must contain a 'metrics' field.")
 
     if not isinstance(content["metrics"], list) or not content["metrics"]:
-        raise ValueError("'metrics' must be a non-empty list.")
+        raise ExperimentLoadError("'metrics' must be a non-empty list.")
 
     return content
 

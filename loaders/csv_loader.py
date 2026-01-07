@@ -9,6 +9,7 @@ Responsible for:
 
 from typing import Any
 import pandas as pd
+from utils.io import ExperimentLoadError
 
 
 def load_csv(file: Any) -> pd.DataFrame:
@@ -28,9 +29,9 @@ def load_csv(file: Any) -> pd.DataFrame:
     try:
         df = pd.read_csv(file)
     except Exception as e:
-        raise ValueError(f"Failed to read CSV file: {e}")
+        raise ExperimentLoadError(f"Failed to read CSV file: {e}")
 
     if df.empty:
-        raise ValueError("CSV file is empty.")
+        raise ExperimentLoadError("CSV file is empty.")
 
     return df
