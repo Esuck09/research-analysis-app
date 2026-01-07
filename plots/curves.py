@@ -32,7 +32,8 @@ def plot_metric_curves(
                      f'({exp["model"]}, {exp["dataset"]})',
                 hovertemplate=(
                     "Epoch: %{x}<br>"
-                    f"{metric}: %{y:.4f}<extra></extra>"
+                    f"{metric}: %{{y:.4f}}"
+                    "<extra></extra>"
                 ),
             )
         )

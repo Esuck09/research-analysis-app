@@ -31,9 +31,12 @@ def load_json(file: Any) -> Dict[str, Any]:
         Parsed JSON content.
     """
     try:
-        content = json.load(file)
-    except Exception as e:
-        raise ExperimentLoadError(f"Failed to parse JSON file: {e}")
+        file.seek(0)  # 🔑 CRITICAL FIX
+        return json.load(file)
+    except json.JSONDecodeError as e:
+        raise ExperimentLoadError(
+            f"Failed to parse JSON file: {e}"
+        )
 
     if not isinstance(content, dict):
         raise ExperimentLoadError("Top-level JSON must be an object.")
