@@ -25,4 +25,12 @@ def load_csv(file: Any) -> pd.DataFrame:
     pd.DataFrame
         Raw experiment metrics.
     """
-    raise NotImplementedError
+    try:
+        df = pd.read_csv(file)
+    except Exception as e:
+        raise ValueError(f"Failed to read CSV file: {e}")
+
+    if df.empty:
+        raise ValueError("CSV file is empty.")
+
+    return df
