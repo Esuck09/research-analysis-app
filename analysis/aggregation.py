@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 
 from analysis.alignment import align_epochs
-from analysis.resampling import resample_to_grid, build_epoch_grid
+from analysis.resampling import build_epoch_grid, resample_to_grid
+from analysis.bootstrap import bootstrap_curve_ci
 
 
 def aggregate_runs(
@@ -19,159 +20,102 @@ def aggregate_runs(
     grid_mode: str = "common_range",
     grid_step: int = 1,
     interp_kind: str = "linear",
+    compute_ci: bool = False,
+    n_boot: int = 1000,
+    ci_level: float = 0.95,
 ) -> dict:
     """
-    Aggregate multiple experiment runs into mean/std curves.
-
-    Parameters
-    ----------
-    experiments : list[dict]
-        Normalized experiment objects
-    metric : str
-        Metric to aggregate
-    group_by : list[str]
-        Metadata keys to group by (e.g. ["model", "dataset"])
-    alignment_mode : str
-        "intersection" | "truncate" | "last_n"
-    last_n : int | None
-        Used only if alignment_mode == "last_n"
-    use_interpolation : bool
-        If True, resample curves onto a shared epoch grid using interpolation
-    grid_mode : str
-        "common_range" | "union_range"
-    grid_step : int
-        Step size for epoch grid
-    interp_kind : str
-        Interpolation type (currently only "linear" supported)
-
-    Returns
-    -------
-    dict[group_key -> DataFrame]
-        DataFrame columns:
-        - epoch
-        - mean
-        - std
-        - n_runs
+    Aggregate multiple experiment runs into mean/std and optional CI curves.
     """
 
-    # -------------------------
-    # Group experiments
-    # -------------------------
     grouped: dict[tuple, list[dict]] = {}
-
     for exp in experiments:
         key = tuple(exp.get(k, "") for k in group_by)
         grouped.setdefault(key, []).append(exp)
 
     aggregated: dict[tuple, pd.DataFrame] = {}
 
-    # -------------------------
-    # Aggregate per group
-    # -------------------------
     for key, runs in grouped.items():
         if len(runs) < 2:
-            continue  # need at least 2 runs
+            continue
 
-        dfs: list[pd.DataFrame] = []
-
+        dfs = []
         for exp in runs:
             df = exp["metrics_df"]
-
             if metric not in df.columns:
                 continue
-
-            sub = df[["epoch", metric]].dropna()
-            if sub.empty:
-                continue
-
-            sub = sub.sort_values("epoch").reset_index(drop=True)
-            dfs.append(sub)
+            sub = df[["epoch", metric]].dropna().sort_values("epoch")
+            if not sub.empty:
+                dfs.append(sub)
 
         if len(dfs) < 2:
             continue
 
-        # =========================================================
-        # INTERPOLATION PATH (V3-D)
-        # =========================================================
+        # =====================================================
+        # Interpolation path
+        # =====================================================
         if use_interpolation:
-            try:
-                grid = build_epoch_grid(
-                    dfs=dfs,
-                    mode=grid_mode,
-                    step=grid_step,
-                )
-            except Exception:
-                continue
-
-            if grid.size < 2:
+            grid = build_epoch_grid(dfs, mode=grid_mode, step=grid_step)
+            if len(grid) < 2:
                 continue
 
             resampled = [
-                resample_to_grid(
-                    df,
-                    metric=metric,
-                    epoch_grid=grid,
-                    kind=interp_kind,
-                )
+                resample_to_grid(df, metric, grid, interp_kind)
                 for df in dfs
             ]
 
-            if len(resampled) < 2:
-                continue
+            epochs = resampled[0]["epoch"].to_numpy()
+            values = [r[metric].to_numpy() for r in resampled]
+            stacked = pd.DataFrame(values).T
 
-            epochs = resampled[0]["epoch"].to_numpy(dtype=int)
-            values = [r[metric].to_numpy(dtype=float) for r in resampled]
-
-            stacked = pd.DataFrame(values).T  # epochs × runs
-
-            # Drop epochs where ALL runs are NaN
             keep = ~stacked.isna().all(axis=1)
-            stacked = stacked.loc[keep].reset_index(drop=True)
+            stacked = stacked.loc[keep]
             epochs = epochs[keep]
 
             if len(epochs) < 2:
                 continue
 
-        # =========================================================
-        # STRICT ALIGNMENT PATH (V3-C)
-        # =========================================================
+        # =====================================================
+        # Strict alignment path
+        # =====================================================
         else:
-            try:
-                aligned_dfs, _ = align_epochs(
-                    dfs=dfs,
-                    metric=metric,
-                    mode=alignment_mode,
-                    last_n=last_n,
-                )
-            except Exception:
+            aligned, _ = align_epochs(
+                dfs,
+                metric=metric,
+                mode=alignment_mode,
+                last_n=last_n,
+            )
+
+            if len(aligned) < 2:
                 continue
 
-            if len(aligned_dfs) < 2:
-                continue
+            epochs = aligned[0]["epoch"].to_numpy()
+            values = [df[metric].to_numpy() for df in aligned]
+            stacked = pd.DataFrame(values).T
 
-            lengths = [len(df) for df in aligned_dfs]
-            if len(set(lengths)) != 1:
-                continue
-
-            epochs = aligned_dfs[0]["epoch"].to_numpy(dtype=int)
-            values = [df[metric].to_numpy(dtype=float) for df in aligned_dfs]
-
-            stacked = pd.DataFrame(values).T  # epochs × runs
-
-        # -------------------------
+        # =====================================================
         # Aggregate statistics
-        # -------------------------
-        if stacked.shape[1] < 2:
-            continue
+        # =====================================================
+        mean = stacked.mean(axis=1)
+        std = stacked.std(axis=1, ddof=1)
 
         agg_df = pd.DataFrame(
             {
                 "epoch": epochs,
-                "mean": stacked.mean(axis=1),
-                "std": stacked.std(axis=1, ddof=1),
+                "mean": mean,
+                "std": std,
                 "n_runs": stacked.shape[1],
             }
         )
+
+        if compute_ci:
+            ci_df = bootstrap_curve_ci(
+                stacked,
+                n_boot=n_boot,
+                ci=ci_level,
+                random_state=42,
+            )
+            agg_df = pd.concat([agg_df, ci_df], axis=1)
 
         aggregated[key] = agg_df.reset_index(drop=True)
 
