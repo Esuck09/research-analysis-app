@@ -1,7 +1,7 @@
 from typing import List
 import pandas as pd
 from metrics.registry import optimization_direction
-
+from typing import List, Set
 
 def build_summary_table(
     experiments: List[dict],
@@ -56,3 +56,16 @@ def build_summary_table(
         )
 
     return pd.DataFrame(rows)
+
+def intersect_available_metrics(experiments: List[dict]) -> Set[str]:
+    """
+    Compute intersection of available metrics across experiments.
+    """
+    if not experiments:
+        return set()
+
+    metric_sets = [
+        set(exp["available_metrics"]) for exp in experiments
+    ]
+
+    return set.intersection(*metric_sets)

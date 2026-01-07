@@ -1,4 +1,7 @@
 import streamlit as st
+from utils.tables import build_summary_table
+import pandas as pd
+from utils.tables import intersect_available_metrics
 
 def init_page() -> None:
     """Configure Streamlit page settings."""
@@ -97,7 +100,6 @@ def render_sidebar() -> None:
 
         st.session_state["uploaded_files"] = uploaded_files
 
-
 def render_main_placeholders() -> None:
     """Main page placeholder sections."""
     st.header("📋 Experiment Summary")
@@ -109,12 +111,97 @@ def render_main_placeholders() -> None:
     st.header("📤 Export")
     st.info("Download plot PNGs and summary CSVs here.")
 
+def render_experiment_summary() -> None:
+    """Render experiment summary table."""
+    st.header("📋 Experiment Summary")
+
+    experiments = list(st.session_state.get("experiments", {}).values())
+    selected_metric = st.session_state.get("selected_metric")
+
+    if not experiments:
+        st.info("No experiments loaded yet.")
+        return
+
+    if not selected_metric:
+        st.info("Select a metric to view summary statistics.")
+        return
+
+    summary_df = build_summary_table(experiments, selected_metric)
+
+    if summary_df.empty:
+        st.warning(
+            f"No experiments contain the metric '{selected_metric}'."
+        )
+        return
+
+    # Improve column ordering for readability
+    column_order = [
+        "experiment_name",
+        "model",
+        "dataset",
+        "task",
+        "best_value",
+        "best_epoch",
+        "final_value",
+    ]
+    summary_df = summary_df[column_order]
+
+    st.dataframe(
+        summary_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+def render_metric_selector() -> None:
+    """Render metric selection controls in sidebar."""
+    with st.sidebar:
+        st.header("📊 Metric Selection")
+
+        experiments = list(
+            st.session_state.get("experiments", {}).values()
+        )
+
+        if not experiments:
+            st.info("Load experiments to select metrics.")
+            return
+
+        # Enforce single-task selection
+        tasks = {exp["task"] for exp in experiments}
+        if len(tasks) > 1:
+            st.warning(
+                "Metric selection disabled: mixed task types detected "
+                "(classification + segmentation)."
+            )
+            st.session_state["selected_metric"] = None
+            return
+
+        available_metrics = sorted(
+            intersect_available_metrics(experiments)
+        )
+
+        if not available_metrics:
+            st.warning(
+                "No common metrics available across all experiments."
+            )
+            st.session_state["selected_metric"] = None
+            return
+
+        selected_metric = st.selectbox(
+            "Select metric",
+            options=available_metrics,
+            index=0,
+        )
+
+        st.session_state["selected_metric"] = selected_metric
+
+
 def main() -> None:
     init_page()
     init_session_state()
     render_header()
-    render_sidebar()
-    render_main_placeholders()
+    render_sidebar()          # upload & metadata
+    render_metric_selector()  # NEW
+    render_experiment_summary()
 
 if __name__ == "__main__":
     main()
