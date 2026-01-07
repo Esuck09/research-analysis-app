@@ -2,6 +2,7 @@ import streamlit as st
 from utils.tables import build_summary_table
 import pandas as pd
 from utils.tables import intersect_available_metrics
+from plots.curves import plot_metric_curves
 
 def init_page() -> None:
     """Configure Streamlit page settings."""
@@ -194,14 +195,38 @@ def render_metric_selector() -> None:
 
         st.session_state["selected_metric"] = selected_metric
 
+def render_metric_plot() -> None:
+    """Render metric vs epoch plot."""
+    st.header("📈 Metric vs Epoch")
+
+    experiments = list(st.session_state.get("experiments", {}).values())
+    selected_metric = st.session_state.get("selected_metric")
+
+    if not experiments or not selected_metric:
+        st.info("Load experiments and select a metric to view plots.")
+        return
+
+    fig = plot_metric_curves(experiments, selected_metric)
+
+    if not fig.data:
+        st.warning(
+            f"No data available to plot metric '{selected_metric}'."
+        )
+        return
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
 
 def main() -> None:
     init_page()
     init_session_state()
     render_header()
-    render_sidebar()          # upload & metadata
-    render_metric_selector()  # NEW
+    render_sidebar()
+    render_metric_selector()
     render_experiment_summary()
+    render_metric_plot()   
+
 
 if __name__ == "__main__":
     main()
