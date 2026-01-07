@@ -1,353 +1,362 @@
+import json
 import streamlit as st
-import pandas as pd
 
-# ======================
-# Backend imports
-# ======================
 from loaders.csv_loader import load_csv
 from loaders.json_loader import load_json, metrics_to_dataframe
 from loaders.validate import validate_metrics_df
 from loaders.normalize import normalize_experiment
-from utils.io import (
-    ExperimentLoadError,
-    dataframe_to_csv_buffer,
-)
-from utils.tables import (
-    build_summary_table,
-    intersect_available_metrics,
-)
 
-# ======================
-# Plotting imports
-# ======================
-from plots.curves import (
-    plot_metric_curves,
-    plot_metric_curves_matplotlib,
-)
+from utils.io import ExperimentLoadError
+from utils.tables import intersect_available_metrics
+
+from analysis.advanced_summary import compute_advanced_summary
+
+from plots.curves import plot_metric_curves, plot_metric_curves_matplotlib
 from plots.export import export_figure_to_png
 
 
 # ======================
-# Page & session setup
+# Metric tooltips
 # ======================
-def init_page() -> None:
+METRIC_TOOLTIPS = {
+    "accuracy": "Classification accuracy (higher is better).",
+    "precision": "Positive predictive value.",
+    "recall": "Sensitivity / true positive rate.",
+    "f1": "Harmonic mean of precision and recall.",
+    "dice": "Dice similarity coefficient (segmentation overlap).",
+    "iou": "Intersection over Union.",
+    "loss": "Training or validation loss (lower is better).",
+}
+
+
+# ======================
+# Page & State
+# ======================
+def init_page():
     st.set_page_config(
         page_title="Medical Imaging Experiment Comparison",
         page_icon="📊",
         layout="wide",
-        initial_sidebar_state="expanded",
-    )
-
-    st.markdown(
-        """
-        <style>
-            .block-container {
-                padding-top: 1.5rem;
-                padding-bottom: 2rem;
-            }
-            section[data-testid="stSidebar"] {
-                min-width: 300px;
-            }
-        </style>
-        """,
-        unsafe_allow_html=True,
     )
 
 
-def init_session_state() -> None:
-    if "experiments" not in st.session_state:
-        st.session_state["experiments"] = {}
+def init_state():
+    st.session_state.setdefault("file_registry", {})
+    st.session_state.setdefault("experiments", {})
+    st.session_state.setdefault("selected_metric", None)
+    st.session_state.setdefault("selected_metrics", [])
+    st.session_state.setdefault("uploader_key", 0)
+    st.session_state.setdefault("grid_layout", 2)
 
-    if "selected_metric" not in st.session_state:
-        st.session_state["selected_metric"] = None
+    st.session_state.setdefault(
+        "filters",
+        {"model": [], "dataset": [], "task": [], "tags": [], "group": []},
+    )
 
-    if "file_metadata" not in st.session_state:
-        st.session_state["file_metadata"] = {}
-
-    if "uploaded_files" not in st.session_state:
-        st.session_state["uploaded_files"] = []
+    st.session_state.setdefault("highlight", [])
+    st.session_state.setdefault("pending_session", None)
+    st.session_state.setdefault("session_uploader_key", 0)
 
 
 # ======================
 # Header
 # ======================
-def render_header() -> None:
-    st.title("📊 Medical Imaging Experiment Comparison Dashboard")
+def render_header():
+    st.title("📊 Medical Imaging Experiment Comparison Dashboard (V2)")
     st.caption(
-        "Compare classification and segmentation experiments. "
-        "Visualize metrics across epochs and export publication-ready results."
+        "Filtering, multi-metric views, advanced summaries, highlighting, "
+        "session save/load, and publication-ready exports."
     )
     st.divider()
 
 
 # ======================
-# Sidebar
+# Helpers
 # ======================
-def render_sidebar() -> None:
-    with st.sidebar:
-        st.header("📥 Upload Experiments")
-        st.markdown(
-            "Upload experiment logs and provide metadata for comparison."
-        )
-
-        uploaded_files = st.file_uploader(
-            "Upload CSV or JSON experiment files",
-            type=["csv", "json"],
-            accept_multiple_files=True,
-        )
-
-        if uploaded_files:
-            for file in uploaded_files:
-                st.markdown("---")
-                st.subheader(f"📄 {file.name}")
-
-                if file.name not in st.session_state["file_metadata"]:
-                    st.session_state["file_metadata"][file.name] = {
-                        "experiment_name": file.name.rsplit(".", 1)[0],
-                        "model": "",
-                        "dataset": "",
-                        "task": "classification",
-                        "notes": "",
-                    }
-
-                meta = st.session_state["file_metadata"][file.name]
-
-                meta["experiment_name"] = st.text_input(
-                    "Experiment name",
-                    value=meta["experiment_name"],
-                    key=f"exp_name_{file.name}",
-                )
-
-                meta["model"] = st.text_input(
-                    "Model name",
-                    value=meta["model"],
-                    key=f"model_{file.name}",
-                )
-
-                meta["dataset"] = st.text_input(
-                    "Dataset",
-                    value=meta["dataset"],
-                    key=f"dataset_{file.name}",
-                )
-
-                meta["task"] = st.selectbox(
-                    "Task type",
-                    ["classification", "segmentation"],
-                    index=0 if meta["task"] == "classification" else 1,
-                    key=f"task_{file.name}",
-                )
-
-                meta["notes"] = st.text_area(
-                    "Notes (optional)",
-                    value=meta["notes"],
-                    key=f"notes_{file.name}",
-                )
-
-        st.session_state["uploaded_files"] = uploaded_files or []
-
-        st.markdown("---")
-        st.caption("All data stays local • No uploads • No tracking")
+def parse_tags(raw: str) -> list[str]:
+    if not raw:
+        return []
+    return sorted({t.strip() for t in raw.split(",") if t.strip()})
 
 
 # ======================
-# Safe loader integration
+# Session Save / Load
 # ======================
-def load_experiments_from_sidebar() -> None:
-    uploaded_files = st.session_state.get("uploaded_files", [])
-    metadata_map = st.session_state.get("file_metadata", {})
+def serialize_session() -> dict:
+    file_meta = {}
+    for fname, meta in st.session_state["file_registry"].items():
+        file_meta[fname] = {
+            "experiment_name": meta.get("experiment_name"),
+            "model": meta.get("model"),
+            "dataset": meta.get("dataset"),
+            "task": meta.get("task"),
+            "tags_raw": meta.get("tags_raw"),
+            "group": meta.get("group"),
+            "saved": meta.get("saved"),
+        }
 
-    for file in uploaded_files:
-        meta = metadata_map.get(file.name)
-        if not meta:
+    return {
+        "version": "v2",
+        "file_metadata": file_meta,
+        "ui_state": {
+            "filters": st.session_state["filters"],
+            "highlight": st.session_state["highlight"],
+            "selected_metrics": st.session_state["selected_metrics"],
+            "grid_layout": st.session_state["grid_layout"],
+        },
+    }
+
+
+def apply_session(payload: dict):
+    st.session_state["filters"] = payload["ui_state"].get("filters", {})
+    st.session_state["highlight"] = payload["ui_state"].get("highlight", [])
+    st.session_state["selected_metrics"] = payload["ui_state"].get("selected_metrics", [])
+    st.session_state["grid_layout"] = payload["ui_state"].get("grid_layout", 2)
+
+    if not st.session_state["file_registry"]:
+        st.session_state["pending_session"] = payload
+        return
+
+    for fname, meta in st.session_state["file_registry"].items():
+        if fname in payload["file_metadata"]:
+            m = payload["file_metadata"][fname]
+            meta.update(m)
+            meta["tags"] = parse_tags(meta.get("tags_raw", ""))
+
+    load_experiments()
+
+
+def render_session_controls():
+    with st.expander("💾 Session", expanded=False):
+        c1, c2 = st.columns(2)
+
+        with c1:
+            payload = serialize_session()
+            st.download_button(
+                "⬇️ Download session",
+                json.dumps(payload, indent=2).encode(),
+                "experiment_session.json",
+                "application/json",
+            )
+
+        with c2:
+            f = st.file_uploader(
+                "Load session",
+                type=["json"],
+                label_visibility="collapsed",
+                key=f"session_{st.session_state['session_uploader_key']}",
+            )
+            if f:
+                apply_session(json.load(f))
+                st.session_state["session_uploader_key"] += 1
+                st.rerun()
+
+
+# ======================
+# File Manager
+# ======================
+def render_file_manager():
+    st.header("📁 Manage Experiments")
+
+    uploaded = st.file_uploader(
+        "Add experiment files",
+        type=["csv", "json"],
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+        key=f"uploader_{st.session_state['uploader_key']}",
+    )
+
+    if uploaded:
+        for f in uploaded:
+            if f.name not in st.session_state["file_registry"]:
+                st.session_state["file_registry"][f.name] = {
+                    "file": f,
+                    "experiment_name": f.name.rsplit(".", 1)[0],
+                    "model": "",
+                    "dataset": "",
+                    "task": "classification",
+                    "tags_raw": "",
+                    "tags": [],
+                    "group": "",
+                    "saved": False,
+                }
+
+        if st.session_state.get("pending_session"):
+            apply_session(st.session_state["pending_session"])
+            st.session_state["pending_session"] = None
+
+        st.session_state["uploader_key"] += 1
+        st.rerun()
+
+    for fname, meta in list(st.session_state["file_registry"].items()):
+        with st.container(border=True):
+            cols = st.columns([1.5, 2, 2, 2, 2, 2, 0.7, 0.7])
+
+            cols[0].markdown(f"**{fname}**")
+            meta["experiment_name"] = cols[1].text_input("Experiment", meta["experiment_name"], key=f"exp_{fname}")
+            meta["model"] = cols[2].text_input("Model", meta["model"], key=f"model_{fname}")
+            meta["dataset"] = cols[3].text_input("Dataset", meta["dataset"], key=f"data_{fname}")
+            meta["task"] = cols[4].selectbox("Task", ["classification", "segmentation"], key=f"task_{fname}")
+            meta["tags_raw"] = cols[5].text_input("Tags", meta["tags_raw"], key=f"tags_{fname}")
+            meta["tags"] = parse_tags(meta["tags_raw"])
+
+            save = cols[6].button("💾", key=f"save_{fname}")
+            delete = cols[7].button("🗑️", key=f"del_{fname}")
+
+            if save:
+                meta["saved"] = True
+                load_experiments()
+                st.rerun()
+
+            if delete:
+                del st.session_state["file_registry"][fname]
+                load_experiments()
+                st.rerun()
+
+
+# ======================
+# Loader
+# ======================
+def load_experiments():
+    st.session_state["experiments"] = {}
+
+    for meta in st.session_state["file_registry"].values():
+        if not meta["saved"]:
             continue
 
         try:
-            if file.name.endswith(".csv"):
-                df = load_csv(file)
-            elif file.name.endswith(".json"):
-                content = load_json(file)
-                df = metrics_to_dataframe(content["metrics"])
-            else:
-                raise ExperimentLoadError("Unsupported file type.")
-
+            f = meta["file"]
+            df = load_csv(f) if f.name.endswith(".csv") else metrics_to_dataframe(load_json(f)["metrics"])
             df = validate_metrics_df(df)
 
-            experiment = normalize_experiment(
+            exp = normalize_experiment(
                 metrics_df=df,
-                metadata=meta,
-                source_file=file.name,
+                metadata={
+                    "experiment_name": meta["experiment_name"],
+                    "model": meta["model"],
+                    "dataset": meta["dataset"],
+                    "task": meta["task"],
+                },
+                source_file=f.name,
             )
 
-            st.session_state["experiments"][experiment["id"]] = experiment
+            exp["tags"] = meta["tags"]
+            exp["group"] = meta["group"]
+
+            st.session_state["experiments"][exp["id"]] = exp
 
         except ExperimentLoadError as e:
-            st.error(f"❌ {file.name}: {e}")
+            st.error(str(e))
 
 
 # ======================
-# Metric selector
+# Filters / Highlight / Metric selection
 # ======================
-def render_metric_selector() -> None:
-    with st.sidebar:
-        st.header("📊 Metric Selection")
+def render_filters(experiments):
+    with st.expander("🔎 Filters & Grouping", expanded=True):
+        f = st.session_state["filters"]
 
-        experiments = list(st.session_state["experiments"].values())
-        if not experiments:
-            st.info("Load experiments to select metrics.")
-            return
+        models = sorted({e["model"] for e in experiments if e["model"]})
+        datasets = sorted({e["dataset"] for e in experiments if e["dataset"]})
+        tasks = sorted({e["task"] for e in experiments})
+        tags = sorted({t for e in experiments for t in e.get("tags", [])})
+        groups = sorted({e.get("group") for e in experiments if e.get("group")})
 
-        tasks = {exp["task"] for exp in experiments}
-        if len(tasks) > 1:
-            st.warning(
-                "Metric selection disabled: mixed task types detected."
-            )
-            st.session_state["selected_metric"] = None
-            return
+        f["model"] = st.multiselect("Model", models, f["model"])
+        f["dataset"] = st.multiselect("Dataset", datasets, f["dataset"])
+        f["task"] = st.multiselect("Task", tasks, f["task"])
+        f["tags"] = st.multiselect("Tags", tags, f["tags"])
+        f["group"] = st.multiselect("Group", groups, f["group"])
 
-        available_metrics = sorted(
-            intersect_available_metrics(experiments)
-        )
+        def keep(e):
+            if f["model"] and e["model"] not in f["model"]:
+                return False
+            if f["dataset"] and e["dataset"] not in f["dataset"]:
+                return False
+            if f["task"] and e["task"] not in f["task"]:
+                return False
+            if f["group"] and e.get("group") not in f["group"]:
+                return False
+            if f["tags"] and not set(e.get("tags", [])).intersection(f["tags"]):
+                return False
+            return True
 
-        if not available_metrics:
-            st.warning("No common metrics available.")
-            st.session_state["selected_metric"] = None
-            return
+        return [e for e in experiments if keep(e)]
 
-        st.session_state["selected_metric"] = st.selectbox(
-            "Select metric",
-            available_metrics,
-        )
+
+def render_highlight_controls(experiments):
+    with st.expander("🎯 Highlight & Emphasis", expanded=False):
+        names = [e["experiment_name"] for e in experiments]
+        st.session_state["highlight"] = st.multiselect("Highlight", names, st.session_state["highlight"])
+
+
+def render_metric_selection(experiments):
+    with st.expander("📊 Metric Selection", expanded=True):
+        metrics = sorted(intersect_available_metrics(experiments))
+        selected = st.multiselect("Metrics", metrics, st.session_state["selected_metrics"] or metrics[:1])
+        st.session_state["selected_metrics"] = selected
+        st.session_state["selected_metric"] = selected[0] if selected else None
+        st.session_state["grid_layout"] = st.selectbox("Grid columns", [1, 2, 3], index=1)
+        return selected
 
 
 # ======================
-# Summary table
+# Summary / Plots / Export
 # ======================
-def render_experiment_summary() -> None:
-    st.header("📋 Experiment Summary")
-
-    experiments = list(st.session_state["experiments"].values())
-    metric = st.session_state.get("selected_metric")
-
-    if not experiments:
-        st.info("No experiments loaded yet.")
-        return
-
+def render_summary(experiments, metric):
+    st.subheader("📋 Advanced Summary")
     if not metric:
-        st.info("Select a metric to view summary statistics.")
         return
-
-    summary_df = build_summary_table(experiments, metric)
-    if summary_df.empty:
-        st.warning(f"No experiments contain metric '{metric}'.")
-        return
-
-    summary_df = summary_df[
-        [
-            "experiment_name",
-            "model",
-            "dataset",
-            "task",
-            "best_value",
-            "best_epoch",
-            "final_value",
-        ]
-    ]
-
-    st.dataframe(
-        summary_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "best_value": st.column_config.NumberColumn(format="%.4f"),
-            "final_value": st.column_config.NumberColumn(format="%.4f"),
-        },
-    )
-
-    csv_buffer = dataframe_to_csv_buffer(summary_df)
-    st.download_button(
-        "⬇️ Download summary CSV",
-        csv_buffer,
-        file_name=f"{metric}_summary.csv",
-        mime="text/csv",
-    )
+    df = compute_advanced_summary(experiments, metric)
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-# ======================
-# Interactive plot
-# ======================
-def render_metric_plot() -> None:
-    st.header("📈 Metric vs Epoch")
+def render_metric_grid(experiments, metrics):
+    highlight = st.session_state["highlight"]
+    ncols = st.session_state["grid_layout"]
 
-    experiments = list(st.session_state["experiments"].values())
-    metric = st.session_state.get("selected_metric")
-
-    if not experiments or not metric:
-        st.info("Load experiments and select a metric to view plots.")
-        return
-
-    valid_experiments = [
-        exp
-        for exp in experiments
-        if metric in exp["metrics_df"].columns
-        and not exp["metrics_df"][metric].isna().all()
-    ]
-
-    if not valid_experiments:
-        st.warning(f"No valid data for metric '{metric}'.")
-        return
-
-    with st.spinner("Rendering plot…"):
-        fig = plot_metric_curves(valid_experiments, metric)
-        st.plotly_chart(fig, use_container_width=True)
+    for i in range(0, len(metrics), ncols):
+        cols = st.columns(ncols)
+        for c, m in zip(cols, metrics[i:i+ncols]):
+            title = f"{m} ↓" if "loss" in m.lower() else f"{m} ↑"
+            tooltip = METRIC_TOOLTIPS.get(m.lower(), "")
+            with c:
+                st.markdown(f"### {title}", help=tooltip)
+                fig = plot_metric_curves(experiments, m, highlight=highlight)
+                st.plotly_chart(fig, use_container_width=True)
 
 
-# ======================
-# Comparison plot + export
-# ======================
-def render_comparison_plot() -> None:
-    st.header("🖨️ Comparison Plot (Publication Style)")
-
-    experiments = list(st.session_state["experiments"].values())
-    metric = st.session_state.get("selected_metric")
-
-    if not experiments or not metric:
-        st.info("Load experiments and select a metric to export plots.")
-        return
-
-    fig = plot_metric_curves_matplotlib(experiments, metric)
-    st.pyplot(fig)
-
-    png_buffer = export_figure_to_png(fig)
-
-    st.download_button(
-        "⬇️ Download PNG (300 DPI)",
-        png_buffer,
-        file_name=f"{metric}_comparison.png",
-        mime="image/png",
-    )
+def render_export_section(experiments, metrics):
+    st.subheader("🖨️ Export Publication Plots")
+    for m in metrics:
+        fig = plot_metric_curves_matplotlib(experiments, m, highlight=st.session_state["highlight"])
+        png = export_figure_to_png(fig)
+        st.download_button(f"⬇️ {m}.png", png, f"{m}_comparison.png", "image/png")
 
 
 # ======================
 # Main
 # ======================
-def main() -> None:
+def main():
     init_page()
-    init_session_state()
+    init_state()
     render_header()
-    render_sidebar()
-    load_experiments_from_sidebar()
-    render_metric_selector()
+    render_session_controls()
+    render_file_manager()
 
-    col1, col2 = st.columns([1.1, 1.4], gap="large")
+    saved = list(st.session_state["experiments"].values())
 
-    with col1:
-        render_experiment_summary()
+    left, right = st.columns([1.2, 3.2], gap="large")
 
-    with col2:
-        render_metric_plot()
+    with left:
+        filtered = render_filters(saved)
+        render_highlight_controls(filtered)
+        metrics = render_metric_selection(filtered)
 
-    st.divider()
-    render_comparison_plot()
+    with right:
+        render_summary(filtered, st.session_state["selected_metric"])
+        render_metric_grid(filtered, metrics)
+        render_export_section(filtered, metrics)
 
 
 if __name__ == "__main__":
