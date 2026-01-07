@@ -2,7 +2,7 @@ import streamlit as st
 from utils.tables import build_summary_table
 import pandas as pd
 from utils.tables import intersect_available_metrics
-from plots.curves import plot_metric_curves
+from plots.curves import plot_metric_curves, plot_metric_curves_matplotlib
 
 def init_page() -> None:
     """Configure Streamlit page settings."""
@@ -216,7 +216,20 @@ def render_metric_plot() -> None:
 
     st.plotly_chart(fig, use_container_width=True)
 
+def render_comparison_plot() -> None:
+    """Render publication-style comparison plot (Matplotlib)."""
+    st.header("🖨️ Comparison Plot (Publication Style)")
 
+    experiments = list(st.session_state.get("experiments", {}).values())
+    selected_metric = st.session_state.get("selected_metric")
+
+    if not experiments or not selected_metric:
+        st.info("Load experiments and select a metric to view comparison plot.")
+        return
+
+    fig = plot_metric_curves_matplotlib(experiments, selected_metric)
+
+    st.pyplot(fig)
 
 def main() -> None:
     init_page()
@@ -225,7 +238,8 @@ def main() -> None:
     render_sidebar()
     render_metric_selector()
     render_experiment_summary()
-    render_metric_plot()   
+    render_metric_plot()  
+    render_comparison_plot() 
 
 
 if __name__ == "__main__":
