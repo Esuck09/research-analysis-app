@@ -3,6 +3,7 @@ from utils.tables import build_summary_table
 import pandas as pd
 from utils.tables import intersect_available_metrics
 from plots.curves import plot_metric_curves, plot_metric_curves_matplotlib
+from plots.export import export_figure_to_png
 
 def init_page() -> None:
     """Configure Streamlit page settings."""
@@ -217,19 +218,32 @@ def render_metric_plot() -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 def render_comparison_plot() -> None:
-    """Render publication-style comparison plot (Matplotlib)."""
+    """Render and export publication-style comparison plot."""
     st.header("🖨️ Comparison Plot (Publication Style)")
 
     experiments = list(st.session_state.get("experiments", {}).values())
     selected_metric = st.session_state.get("selected_metric")
 
     if not experiments or not selected_metric:
-        st.info("Load experiments and select a metric to view comparison plot.")
+        st.info(
+            "Load experiments and select a metric to view and export plots."
+        )
         return
 
     fig = plot_metric_curves_matplotlib(experiments, selected_metric)
 
     st.pyplot(fig)
+
+    png_buffer = export_figure_to_png(fig)
+
+    filename = f"{selected_metric}_comparison.png"
+
+    st.download_button(
+        label="⬇️ Download PNG (300 DPI)",
+        data=png_buffer,
+        file_name=filename,
+        mime="image/png",
+    )
 
 def main() -> None:
     init_page()
