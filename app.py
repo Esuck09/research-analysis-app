@@ -4,6 +4,7 @@ import pandas as pd
 from utils.tables import intersect_available_metrics
 from plots.curves import plot_metric_curves, plot_metric_curves_matplotlib
 from plots.export import export_figure_to_png
+from utils.io import dataframe_to_csv_buffer
 
 def init_page() -> None:
     """Configure Streamlit page settings."""
@@ -114,7 +115,7 @@ def render_main_placeholders() -> None:
     st.info("Download plot PNGs and summary CSVs here.")
 
 def render_experiment_summary() -> None:
-    """Render experiment summary table."""
+    """Render experiment summary table with CSV export."""
     st.header("📋 Experiment Summary")
 
     experiments = list(st.session_state.get("experiments", {}).values())
@@ -136,7 +137,6 @@ def render_experiment_summary() -> None:
         )
         return
 
-    # Improve column ordering for readability
     column_order = [
         "experiment_name",
         "model",
@@ -152,6 +152,16 @@ def render_experiment_summary() -> None:
         summary_df,
         use_container_width=True,
         hide_index=True,
+    )
+
+    csv_buffer = dataframe_to_csv_buffer(summary_df)
+    filename = f"{selected_metric}_summary.csv"
+
+    st.download_button(
+        label="⬇️ Download summary CSV",
+        data=csv_buffer,
+        file_name=filename,
+        mime="text/csv",
     )
 
 def render_metric_selector() -> None:
