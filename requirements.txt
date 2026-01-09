@@ -5,6 +5,9 @@ streamlit==1.31.1
 pandas==2.2.0
 numpy==1.26.4
 
+# Scientific computing (REQUIRED)
+scipy==1.11.4
+
 # Plotting
 plotly==5.19.0
 matplotlib==3.8.3
