@@ -94,6 +94,13 @@ def parse_tags(raw: str) -> list[str]:
         return []
     return sorted({t.strip() for t in raw.split(",") if t.strip()})
 
+def dataframe_to_markdown(df):
+    """
+    Convert a DataFrame into a copy-paste friendly markdown table
+    suitable for Word / LaTeX / Google Docs.
+    """
+    return df.to_markdown(index=False)
+
 
 # =========================================================
 # Session controls
@@ -409,7 +416,7 @@ def render_robustness_panel(experiments: list[dict]) -> None:
         max_value=0.50,
         value=0.25,
         step=0.05,
-        help="Fraction of final epochs used to assess stability."
+        help="Fraction of final epochs used to assess stability.",
     )
 
     plateau_tol = c2.number_input(
@@ -418,7 +425,7 @@ def render_robustness_panel(experiments: list[dict]) -> None:
         max_value=1e-2,
         value=1e-3,
         format="%.1e",
-        help="Max per-epoch change to consider performance converged."
+        help="Maximum per-epoch change to consider convergence.",
     )
 
     df = compute_robustness_metrics(
@@ -432,14 +439,26 @@ def render_robustness_panel(experiments: list[dict]) -> None:
         st.warning("Not enough data for robustness metrics.")
         return
 
+    # ---- On-screen table ----
     st.dataframe(df, use_container_width=True, hide_index=True)
-    st.download_button(
-        "⬇️ Download robustness CSV",
-        df.to_csv(index=False).encode("utf-8"),
-        file_name=f"{metric}_robustness.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+
+    # ---- Paper-ready version ----
+    paper_df = df.copy()
+
+    paper_df = paper_df.round({
+        "late_variance": 4,
+        "stability_score": 4,
+    })
+
+    paper_df = paper_df.rename(columns={
+        "experiment_name": "Experiment",
+        "late_variance": "Late-epoch Variance",
+        "stability_score": "Stability Score",
+        "plateau_detected": "Plateau Detected",
+    })
+
+    st.markdown("#### 📋 Copy-paste table (paper-ready)")
+    st.code(dataframe_to_markdown(paper_df), language="markdown")
 
 
 
@@ -456,7 +475,7 @@ def render_learning_dynamics_panel(experiments: list[dict]) -> None:
         "Base metric",
         ["loss", "accuracy", "dice", "iou", "f1"],
         index=0,
-        help="Looks for train_<metric> and val_<metric> columns."
+        help="Looks for train_<metric> and val_<metric> columns.",
     )
 
     tail_fraction = c2.slider(
@@ -465,7 +484,7 @@ def render_learning_dynamics_panel(experiments: list[dict]) -> None:
         max_value=0.50,
         value=0.25,
         step=0.05,
-        help="Fraction of final epochs used for slope calculation."
+        help="Fraction of final epochs used for slope calculation.",
     )
 
     df = compute_learning_dynamics(
@@ -475,17 +494,34 @@ def render_learning_dynamics_panel(experiments: list[dict]) -> None:
     )
 
     if df.empty:
-        st.warning("No matching train/val columns found (expected train_<metric>, val_<metric>).")
+        st.warning(
+            "No matching train/val columns found "
+            "(expected train_<metric>, val_<metric>)."
+        )
         return
 
+    # ---- On-screen table ----
     st.dataframe(df, use_container_width=True, hide_index=True)
-    st.download_button(
-        "⬇️ Download learning dynamics CSV",
-        df.to_csv(index=False).encode("utf-8"),
-        file_name=f"learning_dynamics_{base_metric}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+
+    # ---- Paper-ready version ----
+    paper_df = df.copy()
+
+    paper_df = paper_df.round({
+        "gap_final": 4,
+        "gap_slope_tail": 4,
+    })
+
+    paper_df = paper_df.rename(columns={
+        "experiment_name": "Experiment",
+        "base_metric": "Metric",
+        "gap_final": "Final Train–Val Gap",
+        "gap_slope_tail": "Tail Gap Slope",
+        "best_val_epoch": "Best Val Epoch",
+        "val_drop_after_best": "Val Drop After Best",
+    })
+
+    st.markdown("#### 📋 Copy-paste table (paper-ready)")
+    st.code(dataframe_to_markdown(paper_df), language="markdown")
 
 
 
