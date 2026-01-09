@@ -69,9 +69,6 @@ def init_state():
         "use_interpolation": False,
         "grid_mode": "common_range",
         "grid_step": 1,
-        "show_ci": True,
-        "n_boot": 1000,
-        "ci_level": 0.95,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -106,18 +103,18 @@ def serialize_session():
         "version": "v3",
         "file_metadata": {
             f: {
-                "experiment_name": m["experiment_name"],
-                "model": m["model"],
-                "dataset": m["dataset"],
-                "task": m["task"],
-                "tags_raw": m["tags_raw"],
-                "group": m["group"],
-                "saved": m["saved"],
+                "experiment_name": m.get("experiment_name"),
+                "model": m.get("model"),
+                "dataset": m.get("dataset"),
+                "task": m.get("task"),
+                "tags_raw": m.get("tags_raw"),
+                "group": m.get("group"),
+                "saved": m.get("saved"),
             }
             for f, m in st.session_state["file_registry"].items()
         },
         "ui_state": {
-            k: st.session_state[k]
+            k: st.session_state.get(k)
             for k in [
                 "filters",
                 "highlight",
@@ -138,7 +135,8 @@ def serialize_session():
 def apply_session(payload: dict):
     ui = payload.get("ui_state", {})
     for k, v in ui.items():
-        st.session_state[k] = v
+        if v is not None:
+            st.session_state[k] = v
 
     if not st.session_state["file_registry"]:
         st.session_state["pending_session"] = payload
@@ -151,6 +149,34 @@ def apply_session(payload: dict):
             meta["tags"] = parse_tags(meta.get("tags_raw", ""))
 
     load_experiments()
+
+
+def render_session_controls():
+    with st.expander("💾 Session", expanded=False):
+        c1, c2 = st.columns(2)
+
+        with c1:
+            payload = serialize_session()
+            st.download_button(
+                "⬇️ Download session",
+                json.dumps(payload, indent=2).encode(),
+                "experiment_session.json",
+                "application/json",
+                use_container_width=True,
+            )
+
+        with c2:
+            f = st.file_uploader(
+                "Load session",
+                type=["json"],
+                label_visibility="collapsed",
+                key=f"session_{st.session_state['session_uploader_key']}",
+            )
+            if f:
+                apply_session(json.load(f))
+                st.session_state["session_uploader_key"] += 1
+                st.rerun()
+
 
 # =========================================================
 # Controls (Filters / Highlight / Metric selection)
@@ -169,12 +195,11 @@ def render_filters(experiments: list[dict]) -> list[dict]:
         tags = sorted({t for e in experiments for t in (e.get("tags") or [])})
         groups = sorted({e.get("group") for e in experiments if e.get("group")})
 
-        # Vertical filters
-        f["model"] = st.multiselect("Model", models, default=f.get("model", []))
-        f["dataset"] = st.multiselect("Dataset", datasets, default=f.get("dataset", []))
-        f["task"] = st.multiselect("Task", tasks, default=f.get("task", []))
-        f["group"] = st.multiselect("Group", groups, default=f.get("group", []))
-        f["tags"] = st.multiselect("Tags", tags, default=f.get("tags", []))
+        f["model"] = st.multiselect("Model", models, default=[x for x in f.get("model", []) if x in models])
+        f["dataset"] = st.multiselect("Dataset", datasets, default=[x for x in f.get("dataset", []) if x in datasets])
+        f["task"] = st.multiselect("Task", tasks, default=[x for x in f.get("task", []) if x in tasks])
+        f["group"] = st.multiselect("Group", groups, default=[x for x in f.get("group", []) if x in groups])
+        f["tags"] = st.multiselect("Tags", tags, default=[x for x in f.get("tags", []) if x in tags])
 
         def keep(e: dict) -> bool:
             if f["model"] and e.get("model") not in f["model"]:
@@ -203,15 +228,18 @@ def render_highlight_controls(experiments: list[dict]) -> None:
             return
 
         names = [e["experiment_name"] for e in experiments]
+        prev = st.session_state.get("highlight", [])
+        prev = [x for x in prev if x in names]
+
         st.session_state["highlight"] = st.multiselect(
             "Highlight experiments",
             options=names,
-            default=st.session_state.get("highlight", []),
+            default=prev,
         )
 
 
 def render_metric_selection(experiments: list[dict]) -> list[str]:
-    with st.expander("📊 Metrics", expanded=True):
+    with st.expander("📊 Metric Selection", expanded=True):
         if not experiments:
             st.info("No experiments available.")
             st.session_state["selected_metrics"] = []
@@ -220,34 +248,41 @@ def render_metric_selection(experiments: list[dict]) -> list[str]:
 
         available = sorted(intersect_available_metrics(experiments))
         if not available:
-            st.warning("No common metrics across selected experiments.")
+            st.warning("No common metrics available across filtered experiments.")
             st.session_state["selected_metrics"] = []
             st.session_state["selected_metric"] = None
             return []
 
-        default_sel = st.session_state.get("selected_metrics") or [available[0]]
-        selected = st.multiselect("Select metrics", available, default=default_sel)
+        prev_selected = st.session_state.get("selected_metrics", [])
+        default_selected = [m for m in prev_selected if m in available]
+        if not default_selected:
+            default_selected = [available[0]]
+
+        selected = st.multiselect(
+            "Select metrics",
+            options=available,
+            default=default_selected,
+        )
+
         st.session_state["selected_metrics"] = selected
         st.session_state["selected_metric"] = selected[0] if selected else None
 
         st.session_state["grid_layout"] = int(
             st.selectbox("Grid columns", [1, 2, 3], index=1)
         )
+
         return selected
 
 
 # =========================================================
-# V3 Controls (Alignment / Aggregation / Interpolation)
+# V3 controls
 # =========================================================
 def render_alignment_controls() -> None:
     with st.expander("⏱ Epoch Alignment", expanded=False):
         mode = st.selectbox(
             "Alignment strategy",
             options=["intersection", "truncate", "last_n"],
-            index=["intersection", "truncate", "last_n"].index(
-                st.session_state.get("alignment_mode", "intersection")
-            ),
-            help="How to align epochs before aggregating (no interpolation).",
+            index=["intersection", "truncate", "last_n"].index(st.session_state.get("alignment_mode", "intersection")),
         )
         st.session_state["alignment_mode"] = mode
 
@@ -278,7 +313,6 @@ def render_interpolation_controls() -> None:
         st.session_state["use_interpolation"] = st.toggle(
             "Enable interpolation (linear)",
             value=bool(st.session_state.get("use_interpolation", False)),
-            help="Resample curves onto a shared grid. Must be disclosed in papers.",
         )
 
         if st.session_state["use_interpolation"]:
@@ -296,108 +330,7 @@ def render_interpolation_controls() -> None:
 
 
 # =========================================================
-# Panels (Stats / Robustness / Dynamics)
-# =========================================================
-def render_statistics_panel(experiments: list[dict]) -> None:
-    with st.expander("🧪 Statistics", expanded=False):
-        if not experiments:
-            st.info("No experiments.")
-            return
-        metric = st.session_state.get("selected_metric")
-        if not metric:
-            st.info("Select a metric first.")
-            return
-
-        c1, c2, c3 = st.columns([1, 1, 1])
-        group_field = c1.selectbox("Compare groups by", ["model", "dataset", "group", "task"], index=0)
-        value_mode = c2.selectbox("Value mode", ["final", "best", "auc"], index=0)
-        pairing_field = c3.selectbox("Pair on (optional)", ["None", "group", "dataset", "task"], index=0)
-        pairing_field = None if pairing_field == "None" else pairing_field
-
-        df = compute_pairwise_stats(
-            experiments=experiments,
-            metric=metric,
-            group_field=group_field,
-            value_mode=value_mode,
-            pairing_field=pairing_field,
-        )
-        if df.empty:
-            st.warning("Not enough data for stats with these settings.")
-            return
-
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.download_button(
-            "⬇️ Download stats CSV",
-            df.to_csv(index=False).encode("utf-8"),
-            file_name=f"stats_{metric}_{group_field}_{value_mode}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-
-def render_robustness_panel(experiments: list[dict]) -> None:
-    with st.expander("🧬 Robustness", expanded=False):
-        if not experiments:
-            st.info("No experiments.")
-            return
-        metric = st.session_state.get("selected_metric")
-        if not metric:
-            st.info("Select a metric first.")
-            return
-
-        tail_fraction = st.slider("Late-epoch fraction", 0.10, 0.50, 0.25, 0.05)
-        plateau_tol = st.number_input("Plateau tolerance", min_value=1e-6, max_value=1e-2, value=1e-3, format="%.1e")
-
-        df = compute_robustness_metrics(
-            experiments=experiments,
-            metric=metric,
-            tail_fraction=tail_fraction,
-            plateau_tol=plateau_tol,
-        )
-        if df.empty:
-            st.warning("Not enough data for robustness metrics.")
-            return
-
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.download_button(
-            "⬇️ Download robustness CSV",
-            df.to_csv(index=False).encode("utf-8"),
-            file_name=f"{metric}_robustness.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-
-def render_learning_dynamics_panel(experiments: list[dict]) -> None:
-    with st.expander("📉 Learning Dynamics", expanded=False):
-        if not experiments:
-            st.info("No experiments.")
-            return
-
-        base_metric = st.selectbox("Base metric", ["loss", "accuracy", "dice", "iou", "f1"], index=0)
-        tail_fraction = st.slider("Tail fraction (slope window)", 0.10, 0.50, 0.25, 0.05)
-
-        df = compute_learning_dynamics(
-            experiments=experiments,
-            base_metric=base_metric,
-            tail_fraction=tail_fraction,
-        )
-        if df.empty:
-            st.warning("No matching train/val columns found (expected train_<metric>, val_<metric>).")
-            return
-
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.download_button(
-            "⬇️ Download learning dynamics CSV",
-            df.to_csv(index=False).encode("utf-8"),
-            file_name=f"learning_dynamics_{base_metric}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-
-# =========================================================
-# Summary / Plots / Export
+# Panels
 # =========================================================
 def render_summary(experiments: list[dict], metric: str | None) -> None:
     st.subheader("📋 Advanced Summary")
@@ -415,26 +348,170 @@ def render_summary(experiments: list[dict], metric: str | None) -> None:
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
+def render_statistics_panel(experiments: list[dict]) -> None:
+    st.header("🧪 Statistical Comparisons")
+
+    if not experiments:
+        st.info("Save experiments to enable statistics.")
+        return
+
+    metric = st.session_state.get("selected_metric")
+    if not metric:
+        st.info("Select a metric first.")
+        return
+
+    c1, c2, c3 = st.columns([1, 1, 1])
+
+    group_field = c1.selectbox("Compare groups by", ["model", "dataset", "group", "task"], index=0)
+    value_mode = c2.selectbox("Comparison value", ["final", "best", "auc"], index=0)
+    pairing_field = c3.selectbox("Pair on (optional)", ["None", "group", "dataset", "task"], index=0)
+    pairing_field = None if pairing_field == "None" else pairing_field
+
+    stats_df = compute_pairwise_stats(
+        experiments=experiments,
+        metric=metric,
+        group_field=group_field,
+        value_mode=value_mode,
+        pairing_field=pairing_field,
+    )
+
+    if stats_df.empty:
+        st.warning("Not enough data for statistical comparison.")
+        return
+
+    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "⬇️ Download statistics CSV",
+        stats_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"stats_{metric}_{group_field}_{value_mode}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+def render_robustness_panel(experiments: list[dict]) -> None:
+    st.header("🧬 Robustness")
+
+    if not experiments:
+        st.info("No experiments.")
+        return
+
+    metric = st.session_state.get("selected_metric")
+    if not metric:
+        st.info("Select a metric first.")
+        return
+
+    c1, c2 = st.columns([1, 1])
+
+    tail_fraction = c1.slider(
+        "Late-epoch fraction",
+        min_value=0.10,
+        max_value=0.50,
+        value=0.25,
+        step=0.05,
+        help="Fraction of final epochs used to assess stability."
+    )
+
+    plateau_tol = c2.number_input(
+        "Plateau tolerance",
+        min_value=1e-6,
+        max_value=1e-2,
+        value=1e-3,
+        format="%.1e",
+        help="Max per-epoch change to consider performance converged."
+    )
+
+    df = compute_robustness_metrics(
+        experiments=experiments,
+        metric=metric,
+        tail_fraction=tail_fraction,
+        plateau_tol=plateau_tol,
+    )
+
+    if df.empty:
+        st.warning("Not enough data for robustness metrics.")
+        return
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "⬇️ Download robustness CSV",
+        df.to_csv(index=False).encode("utf-8"),
+        file_name=f"{metric}_robustness.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+
+def render_learning_dynamics_panel(experiments: list[dict]) -> None:
+    st.header("📉 Learning Dynamics")
+
+    if not experiments:
+        st.info("No experiments.")
+        return
+
+    c1, c2 = st.columns([1, 1])
+
+    base_metric = c1.selectbox(
+        "Base metric",
+        ["loss", "accuracy", "dice", "iou", "f1"],
+        index=0,
+        help="Looks for train_<metric> and val_<metric> columns."
+    )
+
+    tail_fraction = c2.slider(
+        "Tail fraction (slope window)",
+        min_value=0.10,
+        max_value=0.50,
+        value=0.25,
+        step=0.05,
+        help="Fraction of final epochs used for slope calculation."
+    )
+
+    df = compute_learning_dynamics(
+        experiments=experiments,
+        base_metric=base_metric,
+        tail_fraction=tail_fraction,
+    )
+
+    if df.empty:
+        st.warning("No matching train/val columns found (expected train_<metric>, val_<metric>).")
+        return
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "⬇️ Download learning dynamics CSV",
+        df.to_csv(index=False).encode("utf-8"),
+        file_name=f"learning_dynamics_{base_metric}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+
+# =========================================================
+# Plot grid (export under each plot)
+# =========================================================
 def render_metric_grid(experiments: list[dict], metrics: list[str]) -> None:
     if not experiments:
         st.info("No experiments to plot.")
         return
     if not metrics:
-        st.info("Select at least one metric.")
+        st.info("Select at least one metric to plot.")
         return
 
     highlight = st.session_state.get("highlight", [])
     ncols = max(1, min(3, int(st.session_state.get("grid_layout", 2))))
 
     for i in range(0, len(metrics), ncols):
-        row = metrics[i : i + ncols]
-        cols = st.columns(len(row))
+        row_metrics = metrics[i:i + ncols]
+        cols = st.columns(len(row_metrics))
 
-        for c, m in zip(cols, row):
+        for c, m in zip(cols, row_metrics):
+            title = f"{m} ↓" if "loss" in m.lower() else f"{m} ↑"
+            tooltip = METRIC_TOOLTIPS.get(m.lower(), "")
+
             with c:
-                # Title per plot
-                title = f"{m} ↓" if "loss" in m.lower() else f"{m} ↑"
-                tooltip = METRIC_TOOLTIPS.get(m.lower(), "")
                 st.markdown(f"### {title}", help=tooltip)
 
                 fig = plot_metric_curves(experiments, m, highlight=highlight)
@@ -444,67 +521,26 @@ def render_metric_grid(experiments: list[dict], metrics: list[str]) -> None:
                         experiments=experiments,
                         metric=m,
                         group_by=st.session_state.get("aggregation_keys", []),
-                        alignment_mode=st.session_state.get("alignment_mode", "intersection"),
-                        last_n=int(st.session_state.get("alignment_last_n", 5)),
-                        use_interpolation=bool(st.session_state.get("use_interpolation", False)),
+                        alignment_mode=st.session_state.get("alignment_mode"),
+                        last_n=st.session_state.get("alignment_last_n"),
+                        use_interpolation=st.session_state.get("use_interpolation", False),
                         grid_mode=st.session_state.get("grid_mode", "common_range"),
                         grid_step=int(st.session_state.get("grid_step", 1)),
                         interp_kind="linear",
                     )
                     plot_aggregated_curves(fig, aggregated, m)
 
-                    if st.session_state.get("use_interpolation", False):
-                        st.caption("⚠ Aggregates are **interpolated** (linear).")
-                    elif st.session_state.get("alignment_mode") != "intersection":
-                        st.caption(f"⚠ Aggregates use '{st.session_state['alignment_mode']}' alignment.")
-
                 st.plotly_chart(fig, use_container_width=True)
 
-
-def render_export_section(experiments: list[dict], metrics: list[str]) -> None:
-    st.subheader("🖨️ Export Publication Plots")
-    if not experiments or not metrics:
-        st.info("Select experiments and metrics to enable export.")
-        return
-
-    highlight = st.session_state.get("highlight", [])
-    for m in metrics:
-        fig = plot_metric_curves_matplotlib(experiments, m, highlight=highlight)
-        png = export_figure_to_png(fig)
-        st.download_button(
-            f"⬇️ {m}.png",
-            png,
-            file_name=f"{m}_comparison.png",
-            mime="image/png",
-            use_container_width=True,
-        )
-
-
-def render_session_controls():
-    with st.expander("💾 Session", expanded=False):
-        c1, c2 = st.columns(2)
-
-        with c1:
-            payload = serialize_session()
-            st.download_button(
-                "⬇️ Download session",
-                json.dumps(payload, indent=2).encode(),
-                "experiment_session.json",
-                "application/json",
-                use_container_width=True,
-            )
-
-        with c2:
-            f = st.file_uploader(
-                "Load session",
-                type=["json"],
-                label_visibility="collapsed",
-                key=f"session_{st.session_state['session_uploader_key']}",
-            )
-            if f:
-                apply_session(json.load(f))
-                st.session_state["session_uploader_key"] += 1
-                st.rerun()
+                fig_pub = plot_metric_curves_matplotlib(experiments, m, highlight=highlight)
+                png = export_figure_to_png(fig_pub)
+                st.download_button(
+                    label=f"⬇️ Download {m}.png",
+                    data=png,
+                    file_name=f"{m}_comparison.png",
+                    mime="image/png",
+                    use_container_width=True,
+                )
 
 
 # =========================================================
@@ -576,7 +612,7 @@ def load_experiments():
     st.session_state["experiments"] = {}
 
     for meta in st.session_state["file_registry"].values():
-        if not meta["saved"]:
+        if not meta.get("saved", False):
             continue
         try:
             f = meta["file"]
@@ -586,15 +622,15 @@ def load_experiments():
             exp = normalize_experiment(
                 metrics_df=df,
                 metadata={
-                    "experiment_name": meta["experiment_name"],
-                    "model": meta["model"],
-                    "dataset": meta["dataset"],
-                    "task": meta["task"],
+                    "experiment_name": meta.get("experiment_name", ""),
+                    "model": meta.get("model", ""),
+                    "dataset": meta.get("dataset", ""),
+                    "task": meta.get("task", "classification"),
                 },
                 source_file=f.name,
             )
-            exp["tags"] = meta["tags"]
-            exp["group"] = meta["group"]
+            exp["tags"] = meta.get("tags", [])
+            exp["group"] = meta.get("group", "")
 
             st.session_state["experiments"][exp["id"]] = exp
         except ExperimentLoadError as e:
@@ -616,25 +652,34 @@ def main():
     if not experiments:
         return
 
-    left, right = st.columns([1.2, 3.2], gap="large")
+    left, right = st.columns([1.1, 3.4], gap="large")
 
     with left:
         filtered = render_filters(experiments)
         render_highlight_controls(filtered)
         metrics = render_metric_selection(filtered)
 
-        render_alignment_controls()
         render_aggregation_controls()
+        render_alignment_controls()
         render_interpolation_controls()
 
-        render_statistics_panel(filtered)
-        render_robustness_panel(filtered)
-        render_learning_dynamics_panel(filtered)
-
     with right:
-        render_summary(filtered, st.session_state["selected_metric"])
         render_metric_grid(filtered, metrics)
-        render_export_section(filtered, metrics)
+
+    st.divider()
+
+    render_summary(filtered, st.session_state.get("selected_metric"))
+    
+    st.divider()
+    render_statistics_panel(filtered)
+
+    st.divider()
+    render_robustness_panel(filtered)
+
+    st.divider()
+    render_learning_dynamics_panel(filtered)
+
+    st.divider()
 
 
 if __name__ == "__main__":
