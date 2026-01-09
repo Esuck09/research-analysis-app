@@ -6,6 +6,7 @@ from loaders.csv_loader import load_csv
 from loaders.json_loader import load_json, metrics_to_dataframe
 from loaders.validate import validate_metrics_df
 from loaders.normalize import normalize_experiment
+from loaders.flexible_loader import load_metrics_any_format
 
 from utils.io import ExperimentLoadError
 from utils.tables import intersect_available_metrics
@@ -652,7 +653,8 @@ def load_experiments():
             continue
         try:
             f = meta["file"]
-            df = load_csv(f) if f.name.endswith(".csv") else metrics_to_dataframe(load_json(f)["metrics"])
+            # df = load_csv(f) if f.name.endswith(".csv") else metrics_to_dataframe(load_json(f)["metrics"])
+            df = load_metrics_any_format(f)
             df = validate_metrics_df(df)
 
             exp = normalize_experiment(
